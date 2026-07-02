@@ -22,7 +22,6 @@ huggingface_hub==1.21.0
 humanize==4.16.0
 idna==3.18
 igraph==1.0.0
-jax==0.4.31
 jaxlib==0.4.31
 jaxtyping==0.3.11
 llvmlite==0.48.0
