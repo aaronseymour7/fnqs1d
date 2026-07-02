@@ -57,3 +57,4 @@ typer==0.25.1
 typing_extensions==4.16.0
 wadler_lindig==0.1.7
 zipp==4.1.0
+jax[cuda12]==0.4.31
