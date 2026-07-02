@@ -61,11 +61,18 @@ since `disorder=False` — a single global coupling, not a per-site field).
 ## Install
 
 ```bash
-pip install netket flax einops transformers optax jax jaxlib
+pip install -r requirements.txt
 ```
-(If you hit `ModuleNotFoundError: No module named 'jax.util'` with a very
-recent JAX, pin `jax==0.4.31 jaxlib==0.4.31` — that's the combination
-tested here against `netket==3.15.2`.)
+
+These exact versions are pinned deliberately and tested end-to-end (model
+forward pass, a full family-SR training run, and `evaluate.py --compare_ed`
+matching exact Lanczos diagonalization). In particular: **do not** `pip
+install netket` unpinned — recent NetKet releases (3.16+) require
+`jax>=0.4.35`, which is incompatible with this repo's float64 ViTFNQS
+architecture as tested. If you need a newer JAX/NetKet, you'll want to
+re-verify the whole pipeline (forward pass + a short training run +
+`--compare_ed`) before trusting results, not just check that imports
+succeed.
 
 ## Train
 
@@ -111,16 +118,33 @@ minutes), so this is a genuinely useful sanity check at this system size.
   attention footprint, but `b=1` is the direct analogue of the 1D TFI
   experiments in the paper.
 - **Family design:** the default is a uniform grid over `[J2_min, J2_max]`.
-  If you mainly care about accuracy right at the frustration crossover
-  (J2/J1≈0.5 for the 1D chain, where the model transitions from a gapless
-  spin liquid to a dimerized phase), bias `--couplings` to be denser there,
-  e.g. `--couplings 0.0 0.2 0.35 0.45 0.5 0.55 0.65 0.8 1.0`.
+  If you mainly care about accuracy right at the frustration crossover, note
+  there are two distinct points of interest in the 1D chain: the gapless
+  spin-fluid → dimerized (BKT) transition sits at the Okamoto-Nomura point,
+  J2/J1 ≈ 0.2411, while J2/J1 = 0.5 is the Majumdar-Ghosh point, an exactly
+  solvable point *inside* the dimerized phase (product of nearest-neighbor
+  singlets), not the transition itself. Bias `--couplings` to be denser
+  around whichever you care about, e.g.
+  `--couplings 0.0 0.15 0.2 0.24 0.28 0.35 0.5 0.7 1.0` to resolve the BKT
+  transition, or add points near 0.5 if you want to check against the exact
+  Majumdar-Ghosh energy.
 - **`total_sz=0`** is hard-coded in `hamiltonians.py` (appropriate ground
   state sector for the antiferromagnetic J1-J2 chain); the
   `MetropolisExchange` sampler preserves it automatically via spin-exchange
   moves.
 - **No Marshall sign rule** (`sign_rule=[False, False]`) is used, matching
   the paper's own 2D snippet — the network learns the sign structure
-  directly rather than via a basis rotation, which matters once J2 makes
-  the model frustrated (Marshall's rule stops being exact past J2/J1≈0.5
-  anyway).
+  directly rather than via a basis rotation. Marshall's sign rule is only
+  exact at J2=0 (the unfrustrated, bipartite case); it degrades
+  progressively as J2 grows rather than breaking at any single threshold,
+  which is why it's simplest to just not apply it and let the network learn
+  signs directly across the whole family.
+- **Energy convention:** NetKet's `nk.operator.Heisenberg` is built from
+  Pauli matrices (eigenvalues ±1), i.e. `H = J * sum sigma_i . sigma_j`,
+  which is **4x** the textbook spin-1/2 convention `H = J * sum S_i . S_j`
+  (`S = sigma/2`). This only rescales the absolute energy scale uniformly —
+  it doesn't affect coupling ratios, phase boundaries, or anything you'd
+  compare across J2/J1 — but keep it in mind when comparing `evaluate.py`
+  output to literature values. E.g. at the Majumdar-Ghosh point (J2/J1=0.5)
+  the textbook exact energy is E0/N = -3/8 = -0.375; in NetKet's convention
+  that's E0/N = -1.5, which is what `--compare_ed` will report.
