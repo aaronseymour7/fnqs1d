@@ -113,7 +113,11 @@ def main():
     print(f"Number of variational parameters: {n_params}")
 
     start_it = 0
-    ckpt_path = os.path.join(args.out_dir, "checkpoint.pkl")
+    ckpt_path = os.path.join(args.out_dir, f"checkpoint_it{it:06d}.pkl")
+    latest_path = os.path.join(args.out_dir, "checkpoint_latest.pkl")
+    with open(ckpt_path, "wb") as f:
+        pickle.dump({...}, f)
+    shutil.copyfile(ckpt_path, latest_path)
     if args.resume and os.path.exists(ckpt_path):
         with open(ckpt_path, "rb") as f:
             state = pickle.load(f)
