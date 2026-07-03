@@ -148,17 +148,16 @@ def main():
     print(f"Number of variational parameters: {n_params}")
 
     start_it = 0
-    ckpt_path = os.path.join(args.out_dir, f"checkpoint_it{start_it:06d}.pkl")
     latest_path = os.path.join(args.out_dir, "checkpoint_latest.pkl")
-    with open(ckpt_path, "wb") as f:
-        pickle.dump({...}, f)
-    shutil.copyfile(ckpt_path, latest_path)
-    if args.resume and os.path.exists(ckpt_path):
-        with open(ckpt_path, "rb") as f:
+
+    if args.resume and os.path.exists(latest_path):
+        with open(latest_path, "rb") as f:
             state = pickle.load(f)
+    
         params = state["params"]
         start_it = state["iter"] + 1
-        print(f"Resumed from {ckpt_path} at iteration {start_it}")
+        print(f"Resumed from iteration {start_it}")
+    
 
     members = build_family(
         model, {"params": params}, couplings, args.N,
@@ -204,12 +203,19 @@ def main():
                 args.out_dir,
                 f"checkpoint_it{it:06d}.pkl"
             )
+        
             with open(ckpt_path, "wb") as f:
-                pickle.dump({"params": params, "iter": it, "couplings": couplings,
-                             "args": vars(args)}, f)
+                pickle.dump({
+                    "params": params,
+                    "iter": it,
+                    "couplings": couplings,
+                    "args": vars(args),
+                }, f)
+        
+            shutil.copyfile(ckpt_path, latest_path)
 
     log_file.close()
-    print(f"Done. Final checkpoint: {ckpt_path}")
+    print(f"Done. Latest checkpoint: {latest_path}")
     print(f"Log: {log_path}")
 
 
