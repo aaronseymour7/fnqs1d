@@ -183,7 +183,7 @@ def main():
         lr = lr_sched(it)
         diag_shift = ds_sched(it)
 
-        dtheta, energies = family_sr_step(
+        dtheta, energies, diagnostics = family_sr_step(
             members, params, diag_shift=diag_shift,
             cg_tol=args.cg_tol, cg_maxiter=args.cg_maxiter,
         )
