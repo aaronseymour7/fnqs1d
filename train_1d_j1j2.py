@@ -165,6 +165,7 @@ def main():
         n_chains=args.n_chains, n_samples=args.n_samples,
         n_discard_per_chain=args.n_discard_per_chain,
         hamiltonian_builder=build_j1j2_chain, seed=args.seed,
+        chunk_size=args.chunk_size,
     )
 
     lr_sched = linear_schedule(args.lr, args.lr_final, args.n_iter)
