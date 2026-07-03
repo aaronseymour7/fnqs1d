@@ -84,7 +84,9 @@ python -m fnqs1d.train_1d_j1j2 \
     --n_chains 256 --n_samples 1024 \
     --n_iter 3000 --lr 0.02 --lr_final 0.005 \
     --diag_shift_init 1e-2 --diag_shift_final 1e-4 \
-    --out_dir ./fnqs_1d_j1j2_run
+    --out_dir ./fnqs_1d_j1j2_run \
+    --ckpt_every 50 \
+    --resume
 ```
 
 This trains one network simultaneously at J2/J1 = 0.0, 0.125, ..., 1.0 (9
