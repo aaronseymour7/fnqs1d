@@ -9,7 +9,7 @@ instead of being re-trained per point.
 Usage
 -----
     python train_1d_j1j2.py                      # defaults: N=20, J2 in [0, 1], R=9
-    python train_1d_j1j2.py --n_iter 4000 --couplings 0.0 0.2 0.4 0.5 0.6 0.8 1.0
+    python train_1d_j1j2.py --n_iter 4000 --couplings 0.0 0.2 0.4 0.5 0.6 0.8 1.0 --chunk_size 2048
 
 Outputs
 -------
