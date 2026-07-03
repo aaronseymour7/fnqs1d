@@ -18,9 +18,12 @@ Outputs
 """
 import argparse
 import csv
+import gc
 import os
 import pickle
+import shutil
 import time
+from collections import deque
 
 import jax
 jax.config.update("jax_enable_x64", True)  # the whole ViTFNQS architecture is float64
@@ -30,7 +33,7 @@ import netket as nk
 
 from .transformer_fnqs import ViTFNQS
 from .hamiltonians import build_j1j2_chain
-from .family_sr import build_family, family_sr_step
+from .family_sr import build_family, family_sr_step, NonFiniteSRError
 
 
 def parse_args():
@@ -63,6 +66,38 @@ def parse_args():
     p.add_argument("--diag_shift_final", type=float, default=1e-4)
     p.add_argument("--cg_tol", type=float, default=1e-6)
     p.add_argument("--cg_maxiter", type=int, default=250)
+    # Memory
+    p.add_argument("--chunk_size", type=int, default=None,
+                    help="forwarded to each MCState; chunks forward/backward passes "
+                         "(and the QGT Jacobian) instead of materializing them for the "
+                         "full n_samples at once. Main lever for host-memory OOMs.")
+    p.add_argument("--qgt", type=str, default="jacobian", choices=["jacobian", "onthefly"],
+                    help="'jacobian' (QGTJacobianPyTree) is faster but holds a "
+                         "(n_samples x n_params) array per family member for the whole "
+                         "CG solve, x R members simultaneously. 'onthefly' (QGTOnTheFly) "
+                         "is slower but O(n_params) memory per member -- use this if "
+                         "R * n_samples * n_params is large relative to available RAM.")
+    # SR stability safeguards
+    p.add_argument("--grad_clip_norm", type=float, default=None,
+                    help="clip each member's raw gradient to this global L2 norm before "
+                         "averaging into F_avg. Off by default.")
+    p.add_argument("--update_clip_norm", type=float, default=None,
+                    help="clip the final SR update dtheta to this global L2 norm. Off by default.")
+    p.add_argument("--max_bad_steps", type=int, default=5,
+                    help="consecutive non-finite/divergent SR steps allowed before rolling "
+                         "back params to the last good checkpoint and continuing.")
+    p.add_argument("--diag_shift_bump", type=float, default=5.0,
+                    help="multiplicative factor applied to diag_shift, temporarily, after a "
+                         "bad step (decays back to schedule value once steps are clean again).")
+    p.add_argument("--spike_window", type=int, default=50,
+                    help="number of recent per-member energies used to detect an energy spike "
+                         "(median absolute deviation based) even when the step didn't NaN out.")
+    p.add_argument("--spike_mad_factor", type=float, default=8.0,
+                    help="a step is treated as a divergence spike if any member's new energy "
+                         "deviates from the rolling median by more than this many MADs.")
+    p.add_argument("--gc_every", type=int, default=20,
+                    help="run gc.collect() + jax.clear_caches() every N iterations, as a "
+                         "backstop against any residual host-memory growth.")
     # Housekeeping
     p.add_argument("--out_dir", type=str, default="./fnqs_1d_j1j2_run")
     p.add_argument("--log_every", type=int, default=10)
