@@ -148,7 +148,7 @@ def main():
     print(f"Number of variational parameters: {n_params}")
 
     start_it = 0
-    ckpt_path = os.path.join(args.out_dir, f"checkpoint_it{it:06d}.pkl")
+    ckpt_path = os.path.join(args.out_dir, f"checkpoint_it{start_it:06d}.pkl")
     latest_path = os.path.join(args.out_dir, "checkpoint_latest.pkl")
     with open(ckpt_path, "wb") as f:
         pickle.dump({...}, f)
@@ -200,6 +200,10 @@ def main():
             print(f"[it {it:5d}] lr={lr:.4f} diag_shift={diag_shift:.1e} :: {msg}")
 
         if it % args.ckpt_every == 0 or it == args.n_iter - 1:
+            ckpt_path = os.path.join(
+                args.out_dir,
+                f"checkpoint_it{it:06d}.pkl"
+            )
             with open(ckpt_path, "wb") as f:
                 pickle.dump({"params": params, "iter": it, "couplings": couplings,
                              "args": vars(args)}, f)
