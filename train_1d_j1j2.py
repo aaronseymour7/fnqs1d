@@ -229,29 +229,49 @@ def main():
             continue  # retry the same iteration with the bumped diag_shift
 
         means = [float(e.mean.real) / args.N for e in energies]  # energy per site
+        errs = [float(e.error_of_mean) / args.N for e in energies]
 
         # Spike check: does any member's new energy fall far outside the
-        # recent rolling median (in units of MAD), even though the SR step
-        # itself didn't produce a non-finite result? This is what was
-        # producing the periodic energy spikes visible in log.csv (sharp
-        # excursions that later relax back) -- the step wasn't NaN, just a
-        # bad CG solve on an ill-conditioned S-matrix.
+        # recent rolling median, even though the SR step itself didn't
+        # produce a non-finite result? This is what was producing the
+        # periodic energy spikes visible in log.csv (sharp excursions that
+        # later relax back) -- the step wasn't NaN, just a bad CG solve on
+        # an ill-conditioned S-matrix.
+        #
+        # Two things matter for not false-triggering on ordinary VMC
+        # sampling noise:
+        #   1. Don't evaluate until the window is FULLY populated -- a MAD
+        #      estimated from a handful of samples (e.g. right after
+        #      --resume, when history is empty) is itself noisy and
+        #      systematically underestimates the true spread, making the
+        #      threshold spuriously tight. This is what caused a
+        #      false-positive cascade ~12-17 iterations after resume.
+        #   2. Anchor the threshold to the *reported* MC sampling error
+        #      (e.error_of_mean), not just the historical spread -- that
+        #      error bar directly measures the current noise scale for
+        #      this member, and combining it in quadrature with a properly
+        #      scaled MAD (x1.4826, the normal-consistency constant) keeps
+        #      the test from being tighter than the statistics justify.
         spiked = False
-        min_hist = max(8, args.spike_window // 4)
-        for hist, m in zip(energy_history, means):
-            if len(hist) >= min_hist:
+        spike_detail = None
+        for hist, m, er in zip(energy_history, means, errs):
+            if len(hist) >= args.spike_window:
                 arr = np.array(hist)
                 med = np.median(arr)
-                mad = np.median(np.abs(arr - med)) + 1e-12
-                if abs(m - med) > args.spike_mad_factor * mad:
+                robust_sigma = 1.4826 * np.median(np.abs(arr - med))
+                noise_scale = np.sqrt(robust_sigma**2 + er**2) + 1e-12
+                if abs(m - med) > args.spike_mad_factor * noise_scale:
                     spiked = True
+                    spike_detail = (m, med, robust_sigma, er)
                     break
 
         if spiked:
             consecutive_bad_steps += 1
-            print(f"[it {it:5d}] energy spike detected (>{args.spike_mad_factor} MAD); "
-                  f"rolling back to last good params, bumping diag_shift "
-                  f"(bad step {consecutive_bad_steps}/{args.max_bad_steps})")
+            m, med, robust_sigma, er = spike_detail
+            print(f"[it {it:5d}] energy spike detected: m={m:.5f} vs median={med:.5f} "
+                  f"(robust_sigma={robust_sigma:.5f}, err={er:.5f}, "
+                  f"threshold={args.spike_mad_factor}x); rolling back to last good "
+                  f"params, bumping diag_shift (bad step {consecutive_bad_steps}/{args.max_bad_steps})")
             params = last_good_params
             diag_shift_bumped = True
             if consecutive_bad_steps >= args.max_bad_steps:
@@ -271,7 +291,6 @@ def main():
             hist.append(m)
 
         if it % args.log_every == 0 or it == args.n_iter - 1:
-            errs = [float(e.error_of_mean) / args.N for e in energies]
             log_writer.writerow([it, time.time() - t0] + means + errs)
             log_file.flush()
             msg = " | ".join(f"J2={c:.2f}: e={m:.5f}+/-{er:.5f}"
