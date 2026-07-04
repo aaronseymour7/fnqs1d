@@ -178,19 +178,99 @@ def main():
         log_writer.writerow(["iter", "wall_time"] + [f"E_J2={c:.4f}" for c in couplings]
                              + [f"Eerr_J2={c:.4f}" for c in couplings])
 
-    t0 = time.time()
-    for it in range(start_it, args.n_iter):
-        lr = lr_sched(it)
-        diag_shift = ds_sched(it)
+    # Rolling per-member energy history for MAD-based spike detection, and
+    # the last set of params that produced a clean (non-diverging) step --
+    # this is what --max_bad_steps / --diag_shift_bump / --spike_* actually
+    # drive; previously these CLI args were parsed but never used.
+    energy_history = [deque(maxlen=args.spike_window) for _ in couplings]
+    last_good_params = params
+    consecutive_bad_steps = 0
+    diag_shift_bumped = False
 
-        dtheta, energies, diagnostics = family_sr_step(
-            members, params, diag_shift=diag_shift,
-            cg_tol=args.cg_tol, cg_maxiter=args.cg_maxiter,
+    def prune_checkpoints(keep_last: int = 3):
+        """Delete old checkpoint_it*.pkl files, keeping only the most recent
+        `keep_last` (checkpoint_latest.pkl is a separate copy and untouched)."""
+        ckpts = sorted(
+            f for f in os.listdir(args.out_dir)
+            if f.startswith("checkpoint_it") and f.endswith(".pkl")
         )
+        for f in (ckpts[:-keep_last] if keep_last > 0 else ckpts):
+            try:
+                os.remove(os.path.join(args.out_dir, f))
+            except OSError:
+                pass
+
+    t0 = time.time()
+    it = start_it
+    while it < args.n_iter:
+        lr = lr_sched(it)
+        base_diag_shift = ds_sched(it)
+        diag_shift = base_diag_shift * (args.diag_shift_bump if diag_shift_bumped else 1.0)
+
+        try:
+            dtheta, energies, diagnostics = family_sr_step(
+                members, params, diag_shift=diag_shift,
+                cg_tol=args.cg_tol, cg_maxiter=args.cg_maxiter,
+                grad_clip_norm=args.grad_clip_norm,
+                update_clip_norm=args.update_clip_norm,
+                qgt_type=args.qgt,
+            )
+        except NonFiniteSRError as e:
+            consecutive_bad_steps += 1
+            print(f"[it {it:5d}] SR step diverged ({e}); rolling back to last good "
+                  f"params, bumping diag_shift (bad step {consecutive_bad_steps}/{args.max_bad_steps})")
+            params = last_good_params
+            diag_shift_bumped = True
+            if consecutive_bad_steps >= args.max_bad_steps:
+                raise RuntimeError(
+                    f"Exceeded --max_bad_steps ({args.max_bad_steps}) consecutive "
+                    f"divergent SR steps at iteration {it}; aborting."
+                )
+            continue  # retry the same iteration with the bumped diag_shift
+
+        means = [float(e.mean.real) / args.N for e in energies]  # energy per site
+
+        # Spike check: does any member's new energy fall far outside the
+        # recent rolling median (in units of MAD), even though the SR step
+        # itself didn't produce a non-finite result? This is what was
+        # producing the periodic energy spikes visible in log.csv (sharp
+        # excursions that later relax back) -- the step wasn't NaN, just a
+        # bad CG solve on an ill-conditioned S-matrix.
+        spiked = False
+        min_hist = max(8, args.spike_window // 4)
+        for hist, m in zip(energy_history, means):
+            if len(hist) >= min_hist:
+                arr = np.array(hist)
+                med = np.median(arr)
+                mad = np.median(np.abs(arr - med)) + 1e-12
+                if abs(m - med) > args.spike_mad_factor * mad:
+                    spiked = True
+                    break
+
+        if spiked:
+            consecutive_bad_steps += 1
+            print(f"[it {it:5d}] energy spike detected (>{args.spike_mad_factor} MAD); "
+                  f"rolling back to last good params, bumping diag_shift "
+                  f"(bad step {consecutive_bad_steps}/{args.max_bad_steps})")
+            params = last_good_params
+            diag_shift_bumped = True
+            if consecutive_bad_steps >= args.max_bad_steps:
+                raise RuntimeError(
+                    f"Exceeded --max_bad_steps ({args.max_bad_steps}) consecutive "
+                    f"divergent/spiking SR steps at iteration {it}; aborting."
+                )
+            continue  # retry the same iteration with the bumped diag_shift
+
+        # Clean step: accept it, reset the bad-step/bump state, and record
+        # the energies used for spike detection on future iterations.
+        consecutive_bad_steps = 0
+        diag_shift_bumped = False
         params = jax.tree_util.tree_map(lambda p, d: p - lr * d, params, dtheta)
+        last_good_params = params
+        for hist, m in zip(energy_history, means):
+            hist.append(m)
 
         if it % args.log_every == 0 or it == args.n_iter - 1:
-            means = [float(e.mean.real) / args.N for e in energies]  # energy per site
             errs = [float(e.error_of_mean) / args.N for e in energies]
             log_writer.writerow([it, time.time() - t0] + means + errs)
             log_file.flush()
@@ -203,7 +283,7 @@ def main():
                 args.out_dir,
                 f"checkpoint_it{it:06d}.pkl"
             )
-        
+
             with open(ckpt_path, "wb") as f:
                 pickle.dump({
                     "params": params,
@@ -211,8 +291,19 @@ def main():
                     "couplings": couplings,
                     "args": vars(args),
                 }, f)
-        
+
             shutil.copyfile(ckpt_path, latest_path)
+            prune_checkpoints(keep_last=3)
+
+        # Backstop against residual host-memory growth: gc.collect() alone
+        # (already done per-step inside family_sr_step) won't release JAX's
+        # compiled-executable cache; jax.clear_caches() does. This is what
+        # --gc_every was added for but never wired in.
+        if args.gc_every and it % args.gc_every == 0:
+            gc.collect()
+            jax.clear_caches()
+
+        it += 1
 
     log_file.close()
     print(f"Done. Latest checkpoint: {latest_path}")
