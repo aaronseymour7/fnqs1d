@@ -185,7 +185,6 @@ def main():
     energy_history = [deque(maxlen=args.spike_window) for _ in couplings]
     last_good_params = params
     consecutive_bad_steps = 0
-    diag_shift_bumped = False
 
     def prune_checkpoints(keep_last: int = 3):
         """Delete old checkpoint_it*.pkl files, keeping only the most recent
@@ -205,7 +204,12 @@ def main():
     while it < args.n_iter:
         lr = lr_sched(it)
         base_diag_shift = ds_sched(it)
-        diag_shift = base_diag_shift * (args.diag_shift_bump if diag_shift_bumped else 1.0)
+        # Escalate with each consecutive failure (bump, bump^2, bump^3, ...)
+        # instead of a flat multiplier -- a single bump level that isn't
+        # enough to escape a bad region will otherwise just reproduce the
+        # same failure on every retry, burning through max_bad_steps
+        # without ever actually trying a more conservative step.
+        diag_shift = base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps)
 
         try:
             dtheta, energies, diagnostics = family_sr_step(
@@ -218,15 +222,15 @@ def main():
         except NonFiniteSRError as e:
             consecutive_bad_steps += 1
             print(f"[it {it:5d}] SR step diverged ({e}); rolling back to last good "
-                  f"params, bumping diag_shift (bad step {consecutive_bad_steps}/{args.max_bad_steps})")
+                  f"params, next diag_shift={base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps):.2e} "
+                  f"(bad step {consecutive_bad_steps}/{args.max_bad_steps})")
             params = last_good_params
-            diag_shift_bumped = True
             if consecutive_bad_steps >= args.max_bad_steps:
                 raise RuntimeError(
                     f"Exceeded --max_bad_steps ({args.max_bad_steps}) consecutive "
                     f"divergent SR steps at iteration {it}; aborting."
                 )
-            continue  # retry the same iteration with the bumped diag_shift
+            continue  # retry the same iteration with the escalated diag_shift
 
         means = [float(e.mean.real) / args.N for e in energies]  # energy per site
         errs = [float(e.error_of_mean) / args.N for e in energies]
@@ -271,9 +275,9 @@ def main():
             print(f"[it {it:5d}] energy spike detected: m={m:.5f} vs median={med:.5f} "
                   f"(robust_sigma={robust_sigma:.5f}, err={er:.5f}, "
                   f"threshold={args.spike_mad_factor}x); rolling back to last good "
-                  f"params, bumping diag_shift (bad step {consecutive_bad_steps}/{args.max_bad_steps})")
+                  f"params, next diag_shift={base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps):.2e} "
+                  f"(bad step {consecutive_bad_steps}/{args.max_bad_steps})")
             params = last_good_params
-            diag_shift_bumped = True
             if consecutive_bad_steps >= args.max_bad_steps:
                 raise RuntimeError(
                     f"Exceeded --max_bad_steps ({args.max_bad_steps}) consecutive "
@@ -281,10 +285,10 @@ def main():
                 )
             continue  # retry the same iteration with the bumped diag_shift
 
-        # Clean step: accept it, reset the bad-step/bump state, and record
-        # the energies used for spike detection on future iterations.
+        # Clean step: accept it, reset the bad-step count (which also
+        # resets the diag_shift escalation back to schedule value), and
+        # record the energies used for spike detection on future iterations.
         consecutive_bad_steps = 0
-        diag_shift_bumped = False
         params = jax.tree_util.tree_map(lambda p, d: p - lr * d, params, dtheta)
         last_good_params = params
         for hist, m in zip(energy_history, means):
