@@ -178,13 +178,29 @@ def main():
         log_writer.writerow(["iter", "wall_time"] + [f"E_J2={c:.4f}" for c in couplings]
                              + [f"Eerr_J2={c:.4f}" for c in couplings])
 
-    # Rolling per-member energy history for MAD-based spike detection, and
-    # the last set of params that produced a clean (non-diverging) step --
-    # this is what --max_bad_steps / --diag_shift_bump / --spike_* actually
-    # drive; previously these CLI args were parsed but never used.
-    energy_history = [deque(maxlen=args.spike_window) for _ in couplings]
-    last_good_params = params
+    # Rolling per-member energy history for MAD-based spike detection.
+    #
+    # param_history holds a *lagged* trail of accepted param snapshots, not
+    # just the single most recent one. A divergence is only detected one
+    # (or more) iterations after it actually happens -- by the time the
+    # spike check fires, the "most recent accepted step" may already BE the
+    # bad state, so rolling back to it is a no-op (this is what was
+    # happening before: diag_shift escalated 500x across 5 retries while
+    # the reported energy didn't move at all, because every retry started
+    # from the same broken params). Instead, each consecutive failure rolls
+    # back one step further into this history, so repeated failures
+    # eventually reach a params snapshot from *before* the divergence
+    # started, not just the last one applied.
+    param_history = deque(maxlen=max(args.spike_window, args.max_bad_steps + 1))
+    param_history.append(params)
     consecutive_bad_steps = 0
+
+    def rollback_params():
+        """Roll back further into param_history with each consecutive
+        failure: 1st failure -> most recent snapshot, 2nd -> one before
+        that, etc., capped at the oldest snapshot available."""
+        depth = min(consecutive_bad_steps, len(param_history) - 1)
+        return param_history[-1 - depth]
 
     def prune_checkpoints(keep_last: int = 3):
         """Delete old checkpoint_it*.pkl files, keeping only the most recent
@@ -221,10 +237,11 @@ def main():
             )
         except NonFiniteSRError as e:
             consecutive_bad_steps += 1
-            print(f"[it {it:5d}] SR step diverged ({e}); rolling back to last good "
-                  f"params, next diag_shift={base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps):.2e} "
+            params = rollback_params()
+            print(f"[it {it:5d}] SR step diverged ({e}); rolling back "
+                  f"{min(consecutive_bad_steps, len(param_history)-1)} snapshot(s) into history, "
+                  f"next diag_shift={base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps):.2e} "
                   f"(bad step {consecutive_bad_steps}/{args.max_bad_steps})")
-            params = last_good_params
             if consecutive_bad_steps >= args.max_bad_steps:
                 raise RuntimeError(
                     f"Exceeded --max_bad_steps ({args.max_bad_steps}) consecutive "
@@ -271,13 +288,14 @@ def main():
 
         if spiked:
             consecutive_bad_steps += 1
+            params = rollback_params()
             m, med, robust_sigma, er = spike_detail
             print(f"[it {it:5d}] energy spike detected: m={m:.5f} vs median={med:.5f} "
                   f"(robust_sigma={robust_sigma:.5f}, err={er:.5f}, "
-                  f"threshold={args.spike_mad_factor}x); rolling back to last good "
-                  f"params, next diag_shift={base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps):.2e} "
+                  f"threshold={args.spike_mad_factor}x); rolling back "
+                  f"{min(consecutive_bad_steps, len(param_history)-1)} snapshot(s) into history, "
+                  f"next diag_shift={base_diag_shift * (args.diag_shift_bump ** consecutive_bad_steps):.2e} "
                   f"(bad step {consecutive_bad_steps}/{args.max_bad_steps})")
-            params = last_good_params
             if consecutive_bad_steps >= args.max_bad_steps:
                 raise RuntimeError(
                     f"Exceeded --max_bad_steps ({args.max_bad_steps}) consecutive "
@@ -290,7 +308,7 @@ def main():
         # record the energies used for spike detection on future iterations.
         consecutive_bad_steps = 0
         params = jax.tree_util.tree_map(lambda p, d: p - lr * d, params, dtheta)
-        last_good_params = params
+        param_history.append(params)
         for hist, m in zip(energy_history, means):
             hist.append(m)
 
