@@ -193,6 +193,7 @@ def main():
     # started, not just the last one applied.
     param_history = deque(maxlen=max(args.spike_window, args.max_bad_steps + 1))
     param_history.append(params)
+    energy_history = [deque(maxlen=args.spike_window) for _ in couplings]
     consecutive_bad_steps = 0
 
     def rollback_params():
